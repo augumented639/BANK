@@ -98,3 +98,24 @@ export const DEFAULT_SETTINGS: ConversionSettings = {
   includeSummarySheetInExcel: true,
   categories: DEFAULT_CATEGORIES,
 };
+
+export interface UserCredits {
+  availableCredits: number;
+  totalEarned: number;
+  totalUsed: number;
+  sharesCount: number;
+  referralCode?: string;
+  referredUsersCount?: number;
+  claimedReferralBonus?: boolean;
+  lastShareVerificationDate?: string;
+  lastClaimDate?: string;
+}
+
+export const INITIAL_USER_CREDITS: UserCredits = {
+  availableCredits: 10,
+  totalEarned: 10,
+  totalUsed: 0,
+  sharesCount: 0,
+  referredUsersCount: 0,
+  claimedReferralBonus: false,
+};

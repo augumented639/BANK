@@ -10,10 +10,14 @@ import {
   FileSpreadsheet,
   Image as ImageIcon,
   ArrowRight,
-  Database
+  Database,
+  Gift,
+  Zap,
+  Lock,
+  Share2
 } from 'lucide-react';
 import { SAMPLE_STATEMENTS } from '../data/sampleStatements';
-import { ExtractedStatement } from '../types';
+import { ExtractedStatement, UserCredits } from '../types';
 
 interface UploadZoneProps {
   onFilesSelected: (files: File[]) => void;
@@ -22,6 +26,8 @@ interface UploadZoneProps {
   processingProgress: number;
   processingStep: string;
   isDarkMode: boolean;
+  credits: UserCredits;
+  onOpenShareEarn: () => void;
 }
 
 export const UploadZone: React.FC<UploadZoneProps> = ({
@@ -31,13 +37,17 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
   processingProgress,
   processingStep,
   isDarkMode,
+  credits,
+  onOpenShareEarn,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const isExhausted = credits.availableCredits <= 0;
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
-    setIsDragging(true);
+    if (!isExhausted) setIsDragging(true);
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
@@ -48,6 +58,10 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    if (isExhausted) {
+      onOpenShareEarn();
+      return;
+    }
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const filesArray = Array.from(e.dataTransfer.files);
       onFilesSelected(filesArray);
@@ -63,17 +77,75 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
     }
   };
 
+  const handleZoneClick = () => {
+    if (isProcessing) return;
+    if (isExhausted) {
+      onOpenShareEarn();
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
   return (
     <div className="w-full space-y-4">
+      
+      {/* Share & Earn Credits Info Bar */}
+      <div className={`p-3.5 sm:p-4 rounded-2xl border flex flex-col sm:flex-row items-center justify-between gap-3 transition-all ${
+        isExhausted
+          ? 'bg-rose-500/10 border-rose-500/30'
+          : 'bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-amber-500/10 border-emerald-500/20'
+      }`}>
+        <div className="flex items-center gap-3 w-full sm:w-auto">
+          <div className={`p-2.5 rounded-xl shrink-0 ${
+            isExhausted ? 'bg-rose-500 text-white' : 'bg-gradient-to-tr from-amber-500 to-emerald-500 text-white shadow-sm'
+          }`}>
+            <Gift className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs sm:text-sm font-bold text-slate-900 dark:text-slate-100">
+                {isExhausted ? 'All Free Conversion Credits Used' : '10 Free Conversions Included for New Users'}
+              </span>
+              <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase ${
+                isExhausted 
+                  ? 'bg-rose-500 text-white' 
+                  : 'bg-emerald-600 text-white shadow-xs'
+              }`}>
+                {credits.availableCredits} Left
+              </span>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+              {isExhausted
+                ? 'Share this webapp link to instantly unlock 10 more free statement conversions!'
+                : 'Need more conversions? Share the app link with your network to unlock +10 credits every time!'}
+            </p>
+          </div>
+        </div>
+
+        <button
+          onClick={onOpenShareEarn}
+          className={`w-full sm:w-auto flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-xs shrink-0 ${
+            isExhausted
+              ? 'bg-rose-600 hover:bg-rose-500 text-white animate-bounce'
+              : 'bg-emerald-600 hover:bg-emerald-500 text-white hover:scale-[1.02]'
+          }`}
+        >
+          <Share2 className="w-4 h-4" />
+          <span>{isExhausted ? 'Unlock 10 Free Converts Now' : 'Share & Earn +10 Converts'}</span>
+        </button>
+      </div>
+
       {/* Drag and Drop Container */}
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={() => !isProcessing && fileInputRef.current?.click()}
+        onClick={handleZoneClick}
         className={`relative border-2 border-dashed rounded-2xl p-6 sm:p-8 text-center transition-all cursor-pointer ${
           isDragging
             ? 'border-emerald-500 bg-emerald-500/5 scale-[1.008]'
+            : isExhausted
+            ? 'border-rose-300 dark:border-rose-800 bg-rose-50/50 dark:bg-rose-950/20'
             : isDarkMode
             ? 'border-slate-700 hover:border-slate-600 bg-slate-800/40 hover:bg-slate-800/60'
             : 'border-slate-300 hover:border-slate-400 bg-slate-50/70 hover:bg-slate-50'
@@ -86,7 +158,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           accept=".pdf,.png,.jpg,.jpeg,.csv,.xlsx,.xls"
           onChange={handleFileInputChange}
           className="hidden"
-          disabled={isProcessing}
+          disabled={isProcessing || isExhausted}
         />
 
         {isProcessing ? (
@@ -113,6 +185,35 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
                 className="bg-emerald-500 h-full rounded-full transition-all duration-300 ease-out"
                 style={{ width: `${Math.max(10, processingProgress)}%` }}
               />
+            </div>
+          </div>
+        ) : isExhausted ? (
+          <div className="space-y-3.5 py-4">
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-rose-100 dark:bg-rose-900/40 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+              <Lock className="w-6 h-6" />
+            </div>
+
+            <div>
+              <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                You Have Reached the Free Limit (0 Converts Remaining)
+              </h3>
+              <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 max-w-md mx-auto">
+                No problem! Share this webapp link with anyone to instantly recharge and unlock <strong>10 more free conversions</strong> immediately.
+              </p>
+            </div>
+
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenShareEarn();
+                }}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-600/20 transition-all hover:scale-[1.03]"
+              >
+                <Gift className="w-4 h-4 text-amber-300" />
+                <span>Share App & Unlock 10 Free Conversions</span>
+              </button>
             </div>
           </div>
         ) : (
@@ -143,10 +244,16 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
               </span>
             </div>
 
-            {/* Privacy indicator */}
-            <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 pt-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-              <span>100% In-Memory Processing &bull; Bank-Grade Privacy &bull; Zero Server Storage</span>
+            {/* Privacy & Credit indicator */}
+            <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 pt-1">
+              <span className="inline-flex items-center gap-1 font-semibold text-emerald-600 dark:text-emerald-400">
+                <Zap className="w-3 h-3" /> {credits.availableCredits} convert{credits.availableCredits !== 1 ? 's' : ''} available
+              </span>
+              <span>&bull;</span>
+              <span className="inline-flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+                100% In-Memory Processing &bull; Bank-Grade Privacy
+              </span>
             </div>
           </div>
         )}
@@ -160,11 +267,11 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-amber-500" />
             <span className="text-xs font-semibold text-slate-900 dark:text-slate-200">
-              No statement file ready? Try pre-loaded sample statements:
+              No statement file ready? Try pre-loaded sample statements (Zero credits cost):
             </span>
           </div>
-          <span className="text-[11px] text-slate-500 dark:text-slate-400">
-            1-click instant preview
+          <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
+            Free instant preview
           </span>
         </div>
 

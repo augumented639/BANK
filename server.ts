@@ -410,6 +410,71 @@ Extraction Rules:
   }
 });
 
+// In-memory store for tracking verified referral visits
+const referralVisits = new Map<string, Set<string>>(); // referralCode -> Set of unique visitorIds
+const claimedReferrals = new Map<string, number>(); // referralCode -> count of claimed rewards
+
+// Register an actual visit from a shared referral link
+app.post('/api/referral/register-visit', (req, res) => {
+  const { referralCode, visitorId } = req.body;
+  if (!referralCode || !visitorId) {
+    return res.status(400).json({ success: false, error: 'Missing referralCode or visitorId' });
+  }
+
+  // Prevent self-referral if visitor has same id as referralCode
+  if (referralCode === visitorId) {
+    return res.json({ success: false, message: 'Self referral ignored' });
+  }
+
+  if (!referralVisits.has(referralCode)) {
+    referralVisits.set(referralCode, new Set());
+  }
+
+  const visitors = referralVisits.get(referralCode)!;
+  const isNew = !visitors.has(visitorId);
+  visitors.add(visitorId);
+
+  return res.json({
+    success: true,
+    isNewVisitor: isNew,
+    totalReferrals: visitors.size,
+    message: isNew ? 'Referral visit verified!' : 'Existing referral visit acknowledged.',
+  });
+});
+
+// Check if any verified referral visits have occurred for a given referralCode
+app.get('/api/referral/check-rewards/:referralCode', (req, res) => {
+  const { referralCode } = req.params;
+  const visitors = referralVisits.get(referralCode);
+  const totalVerified = visitors ? visitors.size : 0;
+  const alreadyClaimed = claimedReferrals.get(referralCode) || 0;
+  const unclaimed = Math.max(0, totalVerified - alreadyClaimed);
+
+  return res.json({
+    success: true,
+    totalVerified,
+    alreadyClaimed,
+    unclaimed,
+    rewardCredits: unclaimed * 10,
+  });
+});
+
+// Acknowledge claiming of verified referral rewards
+app.post('/api/referral/claim-rewards', (req, res) => {
+  const { referralCode } = req.body;
+  if (!referralCode) {
+    return res.status(400).json({ success: false, error: 'Missing referralCode' });
+  }
+  const visitors = referralVisits.get(referralCode);
+  const totalVerified = visitors ? visitors.size : 0;
+  claimedReferrals.set(referralCode, totalVerified);
+
+  return res.json({
+    success: true,
+    claimedTotal: totalVerified,
+  });
+});
+
 // Start Express server and mount Vite middleware
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {

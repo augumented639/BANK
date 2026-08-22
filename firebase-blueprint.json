@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Stores user account information and conversion credits",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "availableCredits": { "type": "number" },
+        "totalEarned": { "type": "number" },
+        "totalUsed": { "type": "number" },
+        "sharesCount": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["email", "availableCredits"]
+    },
+    "StatementRecord": {
+      "title": "Saved Statement Record",
+      "description": "User converted bank statements saved to cloud",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileType": { "type": "string" },
+        "uploadDate": { "type": "string" },
+        "summary": { "type": "object" },
+        "transactions": { "type": "array" }
+      },
+      "required": ["userId", "fileName", "uploadDate"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "entity": "User",
+      "description": "User document containing credit balance and profile"
+    },
+    "/users/{userId}/history/{statementId}": {
+      "entity": "StatementRecord",
+      "description": "Converted statements history belonging to user"
+    }
+  }
+}
