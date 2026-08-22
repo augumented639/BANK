@@ -1,0 +1,6 @@
+{
+  "name": "Bank Statement Converter",
+  "description": "Securely upload and convert bank statements from PDF, images, CSV, and Excel into clean, structured Excel, CSV, and PDF spreadsheets with intelligent column mapping, reconciliation calculations, and batch export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
