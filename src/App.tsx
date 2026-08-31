@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import { Navbar } from './components/Navbar';
 import { UploadZone } from './components/UploadZone';
 import { StatementSummaryCard } from './components/StatementSummaryCard';
@@ -769,6 +770,8 @@ export default function App() {
         isDarkMode={isDarkMode}
       />
 
+      {/* Vercel Web Analytics */}
+      <Analytics />
     </div>
   );
 }
