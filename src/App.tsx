@@ -177,14 +177,14 @@ export default function App() {
     }
   };
 
-  // History state
+  // History state - clean by default (no automatic sample statements)
   const [history, setHistory] = useState<ExtractedStatement[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_HISTORY);
       if (saved) return JSON.parse(saved);
-      return SAMPLE_STATEMENTS;
+      return [];
     } catch {
-      return SAMPLE_STATEMENTS;
+      return [];
     }
   });
 
@@ -208,7 +208,6 @@ export default function App() {
         // Load cloud credits if available, or sync current local credits to cloud
         const cloudCredits = await loadUserCreditsFromCloud(currentUser.uid);
         if (cloudCredits) {
-          // Merge credits with highest available
           const merged: UserCredits = {
             availableCredits: Math.max(cloudCredits.availableCredits, userCredits.availableCredits),
             totalEarned: Math.max(cloudCredits.totalEarned, userCredits.totalEarned),
@@ -243,9 +242,9 @@ export default function App() {
     setTimeout(() => setAuthNotification(null), 3000);
   };
 
-  // Active statements in current session
-  const [statements, setStatements] = useState<ExtractedStatement[]>([SAMPLE_STATEMENTS[0]]);
-  const [activeStatementId, setActiveStatementId] = useState<string | null>(SAMPLE_STATEMENTS[0].id);
+  // Active statements in current session (starts clean and empty)
+  const [statements, setStatements] = useState<ExtractedStatement[]>([]);
+  const [activeStatementId, setActiveStatementId] = useState<string | null>(null);
 
   // Processing state
   const [isProcessing, setIsProcessing] = useState(false);
