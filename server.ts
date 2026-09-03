@@ -475,6 +475,12 @@ app.post('/api/referral/claim-rewards', (req, res) => {
   });
 });
 
+// Google Search Console verification file endpoint
+app.get('/googleb39d2bb795486d21.html', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send('google-site-verification: googleb39d2bb795486d21.html');
+});
+
 // Start Express server and mount Vite middleware
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
