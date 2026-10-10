@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /history
+Disallow: /account
+
+Sitemap: https://www.aistatementconvert.online/sitemap.xml

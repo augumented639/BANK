@@ -1,10 +1,13 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import * as XLSX from 'xlsx';
+import twilio from 'twilio';
+import { renderPageHtml, renderSitemapXml } from './src/server/htmlRenderer';
 
 dotenv.config();
 
@@ -13,6 +16,46 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
+
+// Security Headers Middleware
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  next();
+});
+
+// Production Canonical Domain & HTTPS Redirection
+app.use((req, res, next) => {
+  const host = req.headers.host || '';
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  // If request hits naked domain or http in production, redirect to canonical https://www.aistatementconvert.online
+  if (process.env.NODE_ENV === 'production' && (host === 'aistatementconvert.online' || proto === 'http')) {
+    return res.redirect(301, `https://www.aistatementconvert.online${req.originalUrl}`);
+  }
+  next();
+});
+
+// Simple In-Memory IP Rate Limiter
+const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
+function apiRateLimit(limit: number = 40, windowMs: number = 5 * 60 * 1000) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const entry = ipRequestCounts.get(ip);
+    if (!entry || now > entry.resetTime) {
+      ipRequestCounts.set(ip, { count: 1, resetTime: now + windowMs });
+      return next();
+    }
+    if (entry.count >= limit) {
+      return res.status(429).json({ error: 'Too many requests. Please wait a few moments before trying again.' });
+    }
+    entry.count += 1;
+    next();
+  };
+}
 
 // Support high payload size for base64 bank statements / scanned images / PDFs
 app.use(express.json({ limit: '50mb' }));
@@ -157,14 +200,22 @@ function getCurrencySymbol(code: string = 'USD'): string {
   return map[code.toUpperCase()] || '$';
 }
 
-// Process Bank Statement using Gemini Multimodal Intelligence or Fallback Parser
-app.post('/api/convert/process-statement', async (req, res) => {
+// In-memory rate limiting applied to conversion
+app.post('/api/convert/process-statement', apiRateLimit(30, 5 * 60 * 1000), async (req, res) => {
   try {
     const { fileData, fileName, fileType, mimeType } = req.body;
 
     if (!fileData) {
       return res.status(400).json({ error: 'Missing file data' });
     }
+
+    // File size safety check (max 25MB base64 approx 35MB string)
+    if (typeof fileData === 'string' && fileData.length > 35 * 1024 * 1024) {
+      return res.status(413).json({ error: 'File size exceeds maximum allowed limit of 25MB.' });
+    }
+
+    // Sanitize filename to prevent directory traversal or control characters
+    const cleanFileName = (fileName || 'statement.pdf').replace(/[^a-zA-Z0-9._-]/g, '_').substring(0, 120);
 
     const ai = getGenAI();
 
@@ -475,6 +526,323 @@ app.post('/api/referral/claim-rewards', (req, res) => {
   });
 });
 
+// ==========================================
+// Twilio Phone Number Verification Service
+// ==========================================
+
+// Lazy init Twilio Client
+let twilioClientInstance: any = null;
+function getTwilioClient(): any {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!accountSid || !authToken) {
+    return null;
+  }
+  if (!twilioClientInstance) {
+    try {
+      twilioClientInstance = twilio(accountSid, authToken);
+    } catch (err) {
+      console.error('Failed to initialize Twilio client:', err);
+      return null;
+    }
+  }
+  return twilioClientInstance;
+}
+
+// In-memory OTP storage for phone verifications
+interface PhoneOtpEntry {
+  code: string;
+  expiresAt: number;
+  attempts: number;
+  createdAt: number;
+  isServiceVerify?: boolean;
+}
+const phoneOtpStore = new Map<string, PhoneOtpEntry>();
+
+// Clean up expired OTPs periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [phone, entry] of phoneOtpStore.entries()) {
+    if (entry.expiresAt < now) {
+      phoneOtpStore.delete(phone);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// Helper to sanitize phone number into E.164 format
+function sanitizePhoneNumber(phone: string): string {
+  if (!phone) return '';
+  let cleaned = phone.trim().replace(/[\s\-()]/g, '');
+  if (!cleaned.startsWith('+')) {
+    // If no leading +, prepend + (or default +1 if 10 digits)
+    if (cleaned.length === 10) {
+      cleaned = '+1' + cleaned;
+    } else {
+      cleaned = '+' + cleaned;
+    }
+  }
+  return cleaned;
+}
+
+// Check Twilio configuration status
+app.get('/api/twilio/config', (req, res) => {
+  const hasAccountSid = Boolean(process.env.TWILIO_ACCOUNT_SID);
+  const hasAuthToken = Boolean(process.env.TWILIO_AUTH_TOKEN);
+  const hasPhoneNumber = Boolean(process.env.TWILIO_PHONE_NUMBER);
+  const hasVerifyService = Boolean(process.env.TWILIO_VERIFY_SERVICE_SID);
+
+  res.json({
+    configured: hasAccountSid && hasAuthToken,
+    hasVerifyService,
+    hasPhoneNumber,
+    mode: (hasAccountSid && hasAuthToken) ? 'live' : 'test_ready',
+  });
+});
+
+// Send verification OTP via Twilio SMS or Twilio Verify Service
+app.post('/api/twilio/send-otp', async (req, res) => {
+  try {
+    const { phoneNumber, name } = req.body;
+    if (!phoneNumber || typeof phoneNumber !== 'string') {
+      return res.status(400).json({ success: false, error: 'Valid phone number is required.' });
+    }
+
+    const formattedPhone = sanitizePhoneNumber(phoneNumber);
+    if (formattedPhone.length < 8 || !/^\+[0-9]{7,16}$/.test(formattedPhone)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Please provide a valid phone number with country code (e.g. +1 555 123 4567 or +91 9876543210).' 
+      });
+    }
+
+    // Rate limiting: cooldown 30 seconds between sends for same phone
+    const existing = phoneOtpStore.get(formattedPhone);
+    const now = Date.now();
+    if (existing && (now - existing.createdAt) < 30 * 1000) {
+      const waitSecs = Math.ceil((30 * 1000 - (now - existing.createdAt)) / 1000);
+      return res.status(429).json({ 
+        success: false, 
+        error: `Please wait ${waitSecs} seconds before requesting a new verification code.` 
+      });
+    }
+
+    const twilioClient = getTwilioClient();
+    const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID;
+    const twilioFromNumber = process.env.TWILIO_PHONE_NUMBER;
+
+    // Generate standard 6-digit numeric OTP
+    const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = now + (10 * 60 * 1000); // 10 minutes
+
+    // 1. Try Twilio Verify V2 Service if configured
+    if (twilioClient && verifyServiceSid) {
+      try {
+        const verification = await twilioClient.verify.v2
+          .services(verifyServiceSid)
+          .verifications.create({ to: formattedPhone, channel: 'sms' });
+
+        phoneOtpStore.set(formattedPhone, {
+          code: '', // Twilio Verify manages the actual code
+          expiresAt,
+          attempts: 0,
+          createdAt: now,
+          isServiceVerify: true,
+        });
+
+        return res.json({
+          success: true,
+          status: verification.status,
+          phoneNumber: formattedPhone,
+          message: `Verification SMS sent to ${formattedPhone} via Twilio Verify Service.`,
+          expiresIn: 600,
+        });
+      } catch (verifyErr: any) {
+        console.warn('Twilio Verify Service error, attempting fallback SMS:', verifyErr.message);
+      }
+    }
+
+    // 2. Try Twilio Programmable Messaging SMS if phone number is configured
+    if (twilioClient && twilioFromNumber) {
+      try {
+        const messageBody = `Your Bank Statement Converter verification code is: ${generatedOtp}. This code expires in 10 minutes. Do not share it with anyone.`;
+        const message = await twilioClient.messages.create({
+          body: messageBody,
+          from: twilioFromNumber,
+          to: formattedPhone,
+        });
+
+        phoneOtpStore.set(formattedPhone, {
+          code: generatedOtp,
+          expiresAt,
+          attempts: 0,
+          createdAt: now,
+          isServiceVerify: false,
+        });
+
+        return res.json({
+          success: true,
+          status: message.status,
+          phoneNumber: formattedPhone,
+          sid: message.sid,
+          message: `Verification SMS sent to ${formattedPhone}.`,
+          expiresIn: 600,
+        });
+      } catch (smsErr: any) {
+        console.error('Twilio SMS delivery error:', smsErr.message);
+        return res.status(500).json({
+          success: false,
+          error: `Twilio SMS delivery failed: ${smsErr.message || 'Unknown error'}. Please verify your Twilio phone number and balance.`,
+        });
+      }
+    }
+
+    // 3. Fallback / Test Sandbox Mode (when TWILIO keys are not yet configured in environment)
+    phoneOtpStore.set(formattedPhone, {
+      code: generatedOtp,
+      expiresAt,
+      attempts: 0,
+      createdAt: now,
+      isServiceVerify: false,
+    });
+
+    return res.json({
+      success: true,
+      phoneNumber: formattedPhone,
+      simulated: true,
+      demoCode: generatedOtp,
+      message: `Verification code generated for ${formattedPhone}.`,
+      hint: 'Configure TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN & TWILIO_PHONE_NUMBER in Settings for live SMS delivery.',
+      expiresIn: 600,
+    });
+  } catch (err: any) {
+    console.error('Send OTP Error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to send verification SMS.' });
+  }
+});
+
+// Verify OTP code entered by user
+app.post('/api/twilio/verify-otp', async (req, res) => {
+  try {
+    const { phoneNumber, code } = req.body;
+    if (!phoneNumber || !code) {
+      return res.status(400).json({ success: false, error: 'Phone number and verification code are required.' });
+    }
+
+    const formattedPhone = sanitizePhoneNumber(phoneNumber);
+    const cleanedCode = code.toString().trim();
+
+    if (cleanedCode.length < 4 || cleanedCode.length > 8) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid verification code.' });
+    }
+
+    const record = phoneOtpStore.get(formattedPhone);
+    const now = Date.now();
+
+    const twilioClient = getTwilioClient();
+    const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID;
+
+    // Check with Twilio Verify Service if applicable
+    if (record?.isServiceVerify && twilioClient && verifyServiceSid) {
+      try {
+        const verificationCheck = await twilioClient.verify.v2
+          .services(verifyServiceSid)
+          .verificationChecks.create({ to: formattedPhone, code: cleanedCode });
+
+        if (verificationCheck.status === 'approved') {
+          phoneOtpStore.delete(formattedPhone);
+          return res.json({
+            success: true,
+            verified: true,
+            phoneNumber: formattedPhone,
+            verifiedAt: new Date().toISOString(),
+            message: 'Phone number verified successfully via Twilio Verify.',
+          });
+        } else {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid verification code. Please check and try again.',
+          });
+        }
+      } catch (checkErr: any) {
+        console.error('Twilio Verify Check error:', checkErr);
+        return res.status(400).json({
+          success: false,
+          error: checkErr.message || 'Verification check failed.',
+        });
+      }
+    }
+
+    // Direct OTP verification check
+    if (!record) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No active verification code found for this phone number. Please request a new code.' 
+      });
+    }
+
+    if (now > record.expiresAt) {
+      phoneOtpStore.delete(formattedPhone);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Verification code has expired. Please request a new code.' 
+      });
+    }
+
+    record.attempts += 1;
+    if (record.attempts > 5) {
+      phoneOtpStore.delete(formattedPhone);
+      return res.status(429).json({ 
+        success: false, 
+        error: 'Too many incorrect attempts. Please request a new code.' 
+      });
+    }
+
+    if (record.code !== cleanedCode) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Incorrect code. ${5 - record.attempts} attempt(s) remaining.` 
+      });
+    }
+
+    // Successfully verified!
+    phoneOtpStore.delete(formattedPhone);
+
+    return res.json({
+      success: true,
+      verified: true,
+      phoneNumber: formattedPhone,
+      verifiedAt: new Date().toISOString(),
+      message: 'Phone number successfully verified with Twilio!',
+    });
+  } catch (err: any) {
+    console.error('Verify OTP Error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to verify code.' });
+  }
+});
+
+// Sitemap XML Endpoint
+app.get('/sitemap.xml', (req, res) => {
+  res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+  res.send(renderSitemapXml());
+});
+
+// Robots.txt Endpoint
+app.get('/robots.txt', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.send(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /history\nDisallow: /account\n\nSitemap: https://www.aistatementconvert.online/sitemap.xml\n`);
+});
+
+// Open Graph Static/Dynamic 1200x630 Branded Image
+app.get('/og-image.png', (req, res) => {
+  const svgPath = path.join(process.cwd(), 'public', 'og-image.svg');
+  if (fs.existsSync(svgPath)) {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.sendFile(svgPath);
+  } else {
+    res.status(404).send('OG Image not found');
+  }
+});
+
 // Google Search Console verification file endpoint
 app.get('/googleb39d2bb795486d21.html', (req, res) => {
   res.setHeader('Content-Type', 'text/html');
@@ -483,19 +851,42 @@ app.get('/googleb39d2bb795486d21.html', (req, res) => {
 
 // Start Express server and mount Vite middleware
 async function startServer() {
+  let vite: any = null;
+
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
+    vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: 'spa',
+      appType: 'custom',
     });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    app.use(express.static(distPath, { index: false }));
   }
+
+  // Server-rendered crawlable semantic HTML for all page routes
+  app.get('*', async (req, res, next) => {
+    // Let static assets and API requests pass through
+    if (req.path.startsWith('/api') || (req.path.includes('.') && !req.path.endsWith('.html'))) {
+      return next();
+    }
+
+    try {
+      const { html, status } = renderPageHtml(req.path);
+
+      if (process.env.NODE_ENV !== 'production' && vite) {
+        const transformedHtml = await vite.transformIndexHtml(req.url, html);
+        return res.status(status).set({ 'Content-Type': 'text/html; charset=utf-8' }).end(transformedHtml);
+      } else {
+        return res.status(status).set({ 'Content-Type': 'text/html; charset=utf-8' }).end(html);
+      }
+    } catch (err: any) {
+      if (vite) {
+        vite.ssrFixStacktrace(err);
+      }
+      return next(err);
+    }
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Bank Statement Converter Server running at http://0.0.0.0:${PORT}`);

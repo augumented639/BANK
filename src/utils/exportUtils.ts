@@ -4,6 +4,17 @@ import autoTable from 'jspdf-autotable';
 import JSZip from 'jszip';
 import { ExtractedStatement, ConversionSettings } from '../types';
 
+// Sanitize string against CSV/Excel formula injection (=, +, -, @)
+export function sanitizeFormulaInjection(value: any): any {
+  if (value === null || value === undefined) return '';
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (trimmed.length > 0 && (trimmed.startsWith('=') || trimmed.startsWith('+') || trimmed.startsWith('-') || trimmed.startsWith('@'))) {
+    return `'${value}`;
+  }
+  return value;
+}
+
 // Format currency value helper
 export function formatCurrency(amount: number, symbol: string = '$'): string {
   if (isNaN(amount)) return `${symbol}0.00`;
@@ -48,12 +59,12 @@ export function exportToExcel(statement: ExtractedStatement, settings: Conversio
   const txRows = statement.transactions.map((tx, idx) => ({
     '#': idx + 1,
     'Date': formatDate(tx.date, settings.outputDateFormat),
-    'Description / Particulars': tx.description,
-    'Reference / Chq / ID': tx.reference || '',
+    'Description / Particulars': sanitizeFormulaInjection(tx.description),
+    'Reference / Chq / ID': sanitizeFormulaInjection(tx.reference || ''),
     [`Debit (${statement.summary.currencySymbol})`]: tx.debit > 0 ? tx.debit : '',
     [`Credit (${statement.summary.currencySymbol})`]: tx.credit > 0 ? tx.credit : '',
     [`Balance (${statement.summary.currencySymbol})`]: tx.balance,
-    'Category': tx.category,
+    'Category': sanitizeFormulaInjection(tx.category),
     'Confidence': `${Math.round(tx.confidence * 100)}%`,
     'Status': tx.isFlagged ? 'Review Needed' : 'Verified',
   }));
@@ -81,13 +92,13 @@ export function exportToExcel(statement: ExtractedStatement, settings: Conversio
     const summaryData = [
       ['BANK STATEMENT CONVERSION SUMMARY', ''],
       ['', ''],
-      ['Bank Name', statement.summary.bankName],
-      ['Account Holder', statement.summary.accountHolder || 'N/A'],
-      ['Account Number', statement.summary.accountNumber || 'N/A'],
-      ['Statement Period', statement.summary.statementPeriod || 'N/A'],
+      ['Bank Name', sanitizeFormulaInjection(statement.summary.bankName)],
+      ['Account Holder', sanitizeFormulaInjection(statement.summary.accountHolder || 'N/A')],
+      ['Account Number', sanitizeFormulaInjection(statement.summary.accountNumber || 'N/A')],
+      ['Statement Period', sanitizeFormulaInjection(statement.summary.statementPeriod || 'N/A')],
       ['Currency', `${statement.summary.currency} (${statement.summary.currencySymbol})`],
       ['Date Format', settings.outputDateFormat],
-      ['Extraction Engine', statement.layoutDetected],
+      ['Extraction Engine', sanitizeFormulaInjection(statement.layoutDetected)],
       ['', ''],
       ['FINANCIAL RECONCILIATION', ''],
       ['Opening Balance', statement.summary.openingBalance],
@@ -126,12 +137,12 @@ export function exportToCSV(statement: ExtractedStatement, settings: ConversionS
 
   const rows = statement.transactions.map((tx) => [
     `"${formatDate(tx.date, settings.outputDateFormat)}"`,
-    `"${(tx.description || '').replace(/"/g, '""')}"`,
-    `"${(tx.reference || '').replace(/"/g, '""')}"`,
+    `"${sanitizeFormulaInjection(tx.description || '').replace(/"/g, '""')}"`,
+    `"${sanitizeFormulaInjection(tx.reference || '').replace(/"/g, '""')}"`,
     tx.debit > 0 ? tx.debit.toFixed(2) : '0.00',
     tx.credit > 0 ? tx.credit.toFixed(2) : '0.00',
     tx.balance.toFixed(2),
-    `"${tx.category || 'Other'}"`,
+    `"${sanitizeFormulaInjection(tx.category || 'Other').replace(/"/g, '""')}"`,
     tx.type,
   ]);
 
@@ -269,12 +280,12 @@ export async function exportBatchToZIP(
       const txRows = st.transactions.map((tx, idx) => ({
         '#': idx + 1,
         'Date': formatDate(tx.date, settings.outputDateFormat),
-        'Description': tx.description,
-        'Reference': tx.reference || '',
+        'Description': sanitizeFormulaInjection(tx.description),
+        'Reference': sanitizeFormulaInjection(tx.reference || ''),
         'Debit': tx.debit > 0 ? tx.debit : '',
         'Credit': tx.credit > 0 ? tx.credit : '',
         'Balance': tx.balance,
-        'Category': tx.category,
+        'Category': sanitizeFormulaInjection(tx.category),
       }));
       const wsTx = XLSX.utils.json_to_sheet(txRows);
       XLSX.utils.book_append_sheet(wb, wsTx, 'Transactions');
@@ -286,12 +297,12 @@ export async function exportBatchToZIP(
       const headers = ['Date', 'Description', 'Reference', 'Debit', 'Credit', 'Balance', 'Category'];
       const rows = st.transactions.map((tx) => [
         `"${formatDate(tx.date, settings.outputDateFormat)}"`,
-        `"${(tx.description || '').replace(/"/g, '""')}"`,
-        `"${(tx.reference || '').replace(/"/g, '""')}"`,
+        `"${sanitizeFormulaInjection(tx.description || '').replace(/"/g, '""')}"`,
+        `"${sanitizeFormulaInjection(tx.reference || '').replace(/"/g, '""')}"`,
         tx.debit.toFixed(2),
         tx.credit.toFixed(2),
         tx.balance.toFixed(2),
-        `"${tx.category || 'Other'}"`,
+        `"${sanitizeFormulaInjection(tx.category || 'Other').replace(/"/g, '""')}"`,
       ]);
       const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
       zip.file(`${cleanName}.csv`, csvContent);

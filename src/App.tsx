@@ -9,6 +9,7 @@ import { HistoryDrawer } from './components/HistoryDrawer';
 import { BatchProcessingModal } from './components/BatchProcessingModal';
 import { ShareEarnModal } from './components/ShareEarnModal';
 import { AuthModal } from './components/AuthModal';
+import { PhoneVerificationModal } from './components/PhoneVerificationModal';
 import { 
   ExtractedStatement, 
   Transaction, 
@@ -17,26 +18,41 @@ import {
   UserCredits,
   INITIAL_USER_CREDITS
 } from './types';
-import { SAMPLE_STATEMENTS } from './data/sampleStatements';
 import { 
   FileSpreadsheet, 
   Layers, 
   AlertCircle, 
   Trash2,
-  Cloud,
+  Database,
   CheckCircle2,
-  Gift
+  Gift,
+  ShieldCheck,
+  ChevronRight,
+  ExternalLink,
+  Cookie,
+  ArrowRight
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { 
-  auth, 
-  logoutUser, 
-  syncUserCreditsToCloud, 
-  loadUserCreditsFromCloud,
-  syncStatementToCloud,
-  loadHistoryFromCloud 
-} from './lib/firebase';
-import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+  AppUser,
+  onSupabaseAuthStateChange,
+  signOutUser,
+  syncUserProfileToSupabase,
+  loadUserCreditsFromSupabase,
+  syncStatementToSupabase,
+  clearStatementsFromSupabase,
+  getCurrentSupabaseUser
+} from './lib/supabase';
+import { 
+  ALL_SEO_PAGES, 
+  getPageByPath, 
+  CORE_PAGES, 
+  BRAND_NAME, 
+  SUPPORT_EMAIL, 
+  DOMAIN,
+  SeoPageData 
+} from './data/seoPages';
+import { trackEvent, getCookieConsent, setCookieConsent } from './utils/analytics';
 
 const STORAGE_KEY_HISTORY = 'bank_converter_history_v1';
 const STORAGE_KEY_SETTINGS = 'bank_converter_settings_v1';
@@ -69,15 +85,70 @@ export default function App() {
     }
   }, [isDarkMode]);
 
+  // Current client-side route pathname
+  const [currentPath, setCurrentPath] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return window.location.pathname || '/';
+    }
+    return '/';
+  });
+
+  // Cookie consent banner state
+  const [showCookieBanner, setShowCookieBanner] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('bank_converter_cookie_consent') === null;
+    }
+    return false;
+  });
+
+  // Listen to popstate (browser back/forward)
+  useEffect(() => {
+    const handlePopState = () => {
+      setCurrentPath(window.location.pathname || '/');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Intercept standard anchor links for client-side navigation
+  useEffect(() => {
+    const handleLinkClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement).closest('a');
+      if (!target) return;
+      const href = target.getAttribute('href');
+      if (
+        href && 
+        href.startsWith('/') && 
+        !href.startsWith('/api') && 
+        !href.startsWith('//') && 
+        !e.ctrlKey && 
+        !e.metaKey && 
+        !e.shiftKey
+      ) {
+        e.preventDefault();
+        window.history.pushState({}, '', href);
+        setCurrentPath(href);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    };
+    document.addEventListener('click', handleLinkClick);
+    return () => document.removeEventListener('click', handleLinkClick);
+  }, []);
+
+  // Get active SEO metadata matching route
+  const activeSeoPage: SeoPageData = useMemo(() => {
+    return getPageByPath(currentPath) || CORE_PAGES.home;
+  }, [currentPath]);
+
   // Auth state
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authNotification, setAuthNotification] = useState<string | null>(null);
 
   // Referral Notification
   const [referralNotification, setReferralNotification] = useState<string | null>(null);
 
-  // Conversion credits state (10 free conversions for new users + 10 on each verified share/referral)
+  // Conversion credits state (10 free conversions for new users)
   const [userCredits, setUserCredits] = useState<UserCredits>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_CREDITS);
@@ -100,7 +171,7 @@ export default function App() {
     }
   });
 
-  const saveCredits = (updatedCredits: UserCredits, currentUser?: FirebaseUser | null) => {
+  const saveCredits = (updatedCredits: UserCredits, currentUser?: AppUser | null) => {
     setUserCredits(updatedCredits);
     try {
       localStorage.setItem(STORAGE_KEY_CREDITS, JSON.stringify(updatedCredits));
@@ -109,7 +180,11 @@ export default function App() {
     }
     const targetUser = currentUser !== undefined ? currentUser : user;
     if (targetUser) {
-      syncUserCreditsToCloud(targetUser.uid, updatedCredits, targetUser.email, targetUser.displayName);
+      syncUserProfileToSupabase(targetUser.id, {
+        email: targetUser.email,
+        displayName: targetUser.displayName,
+        credits: updatedCredits,
+      });
     }
   };
 
@@ -123,6 +198,7 @@ export default function App() {
       lastClaimDate: new Date().toISOString(),
     };
     saveCredits(updatedCredits);
+    trackEvent('share_click', { credits_awarded: creditsToAdd });
   };
 
   // Process incoming referral query parameter ?ref=...
@@ -132,7 +208,6 @@ export default function App() {
       const incomingRef = params.get('ref');
       
       if (incomingRef && incomingRef !== userCredits.referralCode && !userCredits.claimedReferralBonus) {
-        // Register visit with backend API
         fetch('/api/referral/register-visit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -177,7 +252,7 @@ export default function App() {
     }
   };
 
-  // History state - clean by default (no automatic sample statements)
+  // History state
   const [history, setHistory] = useState<ExtractedStatement[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_HISTORY);
@@ -188,7 +263,7 @@ export default function App() {
     }
   });
 
-  const saveHistory = (updatedHistory: ExtractedStatement[], currentUser?: FirebaseUser | null) => {
+  const saveHistory = (updatedHistory: ExtractedStatement[], currentUser?: AppUser | null) => {
     setHistory(updatedHistory);
     try {
       localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(updatedHistory));
@@ -197,52 +272,56 @@ export default function App() {
     }
   };
 
-  // Listen to Firebase Auth state
+  // Listen to Supabase Auth state
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    getCurrentSupabaseUser().then((currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+      }
+    });
+
+    const subscription = onSupabaseAuthStateChange(async (currentUser) => {
       setUser(currentUser);
       if (currentUser) {
         setAuthNotification(`Welcome back, ${currentUser.displayName || currentUser.email}!`);
         setTimeout(() => setAuthNotification(null), 4000);
 
-        // Load cloud credits if available, or sync current local credits to cloud
-        const cloudCredits = await loadUserCreditsFromCloud(currentUser.uid);
+        const cloudCredits = await loadUserCreditsFromSupabase(currentUser.id);
         if (cloudCredits) {
           const merged: UserCredits = {
-            availableCredits: Math.max(cloudCredits.availableCredits, userCredits.availableCredits),
-            totalEarned: Math.max(cloudCredits.totalEarned, userCredits.totalEarned),
-            totalUsed: Math.max(cloudCredits.totalUsed, userCredits.totalUsed),
-            sharesCount: Math.max(cloudCredits.sharesCount, userCredits.sharesCount),
+            availableCredits: Math.max(cloudCredits.availableCredits ?? 10, userCredits.availableCredits ?? 10),
+            totalEarned: Math.max(cloudCredits.totalEarned ?? 10, userCredits.totalEarned ?? 10),
+            totalUsed: Math.max(cloudCredits.totalUsed ?? 0, userCredits.totalUsed ?? 0),
+            sharesCount: Math.max(cloudCredits.sharesCount ?? 0, userCredits.sharesCount ?? 0),
             lastClaimDate: cloudCredits.lastClaimDate || userCredits.lastClaimDate,
+            referralCode: userCredits.referralCode || cloudCredits.referralCode || 'REF-' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+            referredUsersCount: Math.max(cloudCredits.referredUsersCount ?? 0, userCredits.referredUsersCount ?? 0),
+            claimedReferralBonus: userCredits.claimedReferralBonus || cloudCredits.claimedReferralBonus || false,
           };
           saveCredits(merged, currentUser);
         } else {
-          syncUserCreditsToCloud(currentUser.uid, userCredits, currentUser.email, currentUser.displayName);
-        }
-
-        // Load cloud history
-        const cloudHistory = await loadHistoryFromCloud(currentUser.uid);
-        if (cloudHistory && cloudHistory.length > 0) {
-          const combinedMap = new Map<string, ExtractedStatement>();
-          cloudHistory.forEach((item) => combinedMap.set(item.id, item));
-          history.forEach((item) => combinedMap.set(item.id, item));
-          const mergedHistory = Array.from(combinedMap.values());
-          saveHistory(mergedHistory, currentUser);
+          syncUserProfileToSupabase(currentUser.id, {
+            email: currentUser.email,
+            displayName: currentUser.displayName,
+            credits: userCredits,
+          });
         }
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      subscription?.unsubscribe();
+    };
   }, []);
 
   const handleLogout = async () => {
-    await logoutUser();
+    await signOutUser();
     setUser(null);
-    setAuthNotification('You have been signed out.');
+    setAuthNotification('Signed out successfully.');
     setTimeout(() => setAuthNotification(null), 3000);
   };
 
-  // Active statements in current session (starts clean and empty)
+  // Active statements in session
   const [statements, setStatements] = useState<ExtractedStatement[]>([]);
   const [activeStatementId, setActiveStatementId] = useState<string | null>(null);
 
@@ -258,13 +337,48 @@ export default function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isBatchOpen, setIsBatchOpen] = useState(false);
   const [isShareEarnOpen, setIsShareEarnOpen] = useState(false);
+  const [isPhoneVerifyOpen, setIsPhoneVerifyOpen] = useState(false);
+
+  // Handle phone verification success
+  const handlePhoneVerificationSuccess = (phoneNumber: string, bonusGranted: boolean) => {
+    const wasAlreadyVerified = userCredits.phoneVerified;
+    const bonusAmount = (!wasAlreadyVerified && bonusGranted) ? 15 : 0;
+    
+    const updatedCredits: UserCredits = {
+      ...userCredits,
+      phoneNumber: phoneNumber,
+      phoneVerified: true,
+      availableCredits: userCredits.availableCredits + bonusAmount,
+      totalEarned: userCredits.totalEarned + bonusAmount,
+    };
+
+    saveCredits(updatedCredits);
+
+    if (user) {
+      setUser({
+        ...user,
+        phoneNumber: phoneNumber,
+        phoneVerified: true,
+      });
+      syncUserProfileToSupabase(user.id, {
+        email: user.email,
+        displayName: user.displayName,
+        phoneNumber: phoneNumber,
+        phoneVerified: true,
+        credits: updatedCredits,
+      });
+    }
+
+    setAuthNotification(`Phone number ${phoneNumber} successfully verified with Twilio! ${bonusAmount > 0 ? '+15 Bonus Credits Added!' : ''}`);
+    setTimeout(() => setAuthNotification(null), 5000);
+  };
 
   // Active statement object
   const activeStatement = useMemo(() => {
     return statements.find((s) => s.id === activeStatementId) || statements[0] || null;
   }, [statements, activeStatementId]);
 
-  // Recalculate summary helper when transactions are edited
+  // Recalculate summary helper
   const recalculateSummary = (statement: ExtractedStatement, updatedTransactions: Transaction[]): ExtractedStatement => {
     let totalDebits = 0;
     let totalCredits = 0;
@@ -296,51 +410,47 @@ export default function App() {
         totalTransactions: updatedTransactions.length,
         flaggedCount,
         reconciliationStatus: isBalanced ? 'balanced' : 'discrepancy',
-        discrepancyAmount: isBalanced ? 0 : Number(discrepancy.toFixed(2)),
+        discrepancyAmount: isBalanced ? 0 : discrepancy,
       },
       transactions: updatedTransactions,
     };
   };
 
-  // Upload and process files
-  const handleFilesSelected = async (files: File[]) => {
-    if (!files || files.length === 0) return;
+  // Convert files handler
+  const handleProcessFiles = async (files: File[]) => {
+    if (files.length === 0) return;
 
-    // Check if user has available conversion credits
-    if (userCredits.availableCredits <= 0) {
+    if (userCredits.availableCredits < files.length) {
+      setGlobalError(
+        `Insufficient conversion credits. You have ${userCredits.availableCredits} credit(s) available for ${files.length} file(s). Share with friends to get +10 more free conversions!`
+      );
       setIsShareEarnOpen(true);
-      setGlobalError("You've used all free conversions! Share the site or create an account to unlock more conversions.");
       return;
     }
 
-    // Limit files to remaining available credits if batch exceeds balance
-    const filesToProcess = files.slice(0, userCredits.availableCredits);
-    if (files.length > userCredits.availableCredits) {
-      setGlobalError(`Processing ${filesToProcess.length} of ${files.length} files with your remaining credits. Share to unlock +10 more!`);
-    }
+    trackEvent('upload_start', { file_count: files.length });
 
     setIsProcessing(true);
+    setProcessingProgress(10);
+    setProcessingStep('Analyzing statement documents...');
     setGlobalError(null);
-    setProcessingProgress(15);
-    setProcessingStep(`Parsing ${filesToProcess.length} statement file${filesToProcess.length > 1 ? 's' : ''}...`);
 
     const newExtractedStatements: ExtractedStatement[] = [];
 
-    for (let i = 0; i < filesToProcess.length; i++) {
-      const file = filesToProcess[i];
-      setProcessingProgress(Math.round(((i + 1) / filesToProcess.length) * 80));
-      setProcessingStep(`Extracting ${file.name} (${i + 1}/${filesToProcess.length})...`);
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const progressBase = Math.round((i / files.length) * 80) + 10;
+      setProcessingProgress(progressBase);
+      setProcessingStep(`Parsing ${file.name} (${i + 1}/${files.length})...`);
 
       try {
-        // Read file as base64
+        // Read file as base64 for backend AI extraction
         const base64Data = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => resolve(reader.result as string);
-          reader.onerror = (err) => reject(err);
+          reader.onerror = reject;
           reader.readAsDataURL(file);
         });
-
-        const extension = file.name.split('.').pop()?.toLowerCase() || 'pdf';
 
         const response = await fetch('/api/convert/process-statement', {
           method: 'POST',
@@ -348,26 +458,35 @@ export default function App() {
           body: JSON.stringify({
             fileData: base64Data,
             fileName: file.name,
-            fileType: extension,
-            mimeType: file.type,
-            customSettings: settings,
+            fileType: file.name.split('.').pop()?.toLowerCase() || 'pdf',
+            mimeType: file.type || 'application/pdf',
           }),
         });
 
-        const data = await response.json();
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error || `Server returned error ${response.status}`);
+        }
 
-        if (data.success && data.statement) {
+        const data = await response.json();
+        if (data.statement) {
           newExtractedStatements.push(data.statement);
-          // If user is authenticated, sync statement to Firestore
           if (user) {
-            syncStatementToCloud(user.uid, data.statement);
+            syncStatementToSupabase(user.id, data.statement);
           }
         } else {
-          throw new Error(data.error || 'Failed to extract bank statement');
+          throw new Error('Invalid statement payload from server');
         }
       } catch (err: any) {
-        console.error('File conversion error:', err);
-        setGlobalError(`Error converting ${file.name}: ${err.message || 'Check document format'}`);
+        console.warn(`Local client OCR fallback parsing for ${file.name}:`, err);
+        
+        const { parseFileLocally } = await import('./utils/ocrFallbackParser');
+        const fallbackData = await parseFileLocally(file, settings);
+        newExtractedStatements.push(fallbackData);
+
+        if (user) {
+          syncStatementToSupabase(user.id, fallbackData);
+        }
       }
     }
 
@@ -375,7 +494,6 @@ export default function App() {
     setProcessingStep('Conversion complete!');
 
     if (newExtractedStatements.length > 0) {
-      // Deduct used credits
       const usedCount = newExtractedStatements.length;
       const updatedCredits: UserCredits = {
         ...userCredits,
@@ -387,9 +505,9 @@ export default function App() {
       setStatements((prev) => [...newExtractedStatements, ...prev]);
       setActiveStatementId(newExtractedStatements[0].id);
 
-      // Append to history
       saveHistory([...newExtractedStatements, ...history]);
       confetti({ particleCount: 60, spread: 80, origin: { y: 0.6 } });
+      trackEvent('convert_success', { count: newExtractedStatements.length });
     }
 
     setTimeout(() => {
@@ -399,46 +517,25 @@ export default function App() {
     }, 600);
   };
 
-  // Load a sample statement (Demo/test exploration without spending credits)
-  const handleLoadSample = (sample: ExtractedStatement) => {
-    const freshSample: ExtractedStatement = {
-      ...sample,
-      id: `sample-${Date.now()}`,
-      uploadDate: new Date().toISOString(),
-    };
-
-    setStatements((prev) => [freshSample, ...prev]);
-    setActiveStatementId(freshSample.id);
-    saveHistory([freshSample, ...history]);
-    confetti({ particleCount: 35, spread: 60, origin: { y: 0.8 } });
-  };
-
-  // Auto reconcile discrepancy
-  const handleAutoReconcile = () => {
-    if (!activeStatement) return;
-    const balancedStatement: ExtractedStatement = {
-      ...activeStatement,
-      summary: {
-        ...activeStatement.summary,
-        closingBalance: activeStatement.summary.calculatedClosingBalance,
-        reconciliationStatus: 'balanced',
-        discrepancyAmount: 0,
-      },
-    };
-
-    setStatements((prev) => prev.map((s) => (s.id === activeStatement.id ? balancedStatement : s)));
-    confetti({ particleCount: 30, spread: 50, origin: { y: 0.85 } });
-  };
-
-  // Transaction updates
   const handleUpdateTransaction = (updatedTx: Transaction) => {
     if (!activeStatement) return;
-    const newTxList = activeStatement.transactions.map((tx) => (tx.id === updatedTx.id ? updatedTx : tx));
+    const newTxList = activeStatement.transactions.map((t) => (t.id === updatedTx.id ? updatedTx : t));
     const updated = recalculateSummary(activeStatement, newTxList);
     setStatements((prev) => prev.map((s) => (s.id === activeStatement.id ? updated : s)));
     if (user) {
-      syncStatementToCloud(user.uid, updated);
+      syncStatementToSupabase(user.id, updated);
     }
+  };
+
+  const handleAutoReconcile = () => {
+    if (!activeStatement) return;
+    const verifiedTxList = activeStatement.transactions.map((tx) => ({
+      ...tx,
+      isFlagged: false,
+      confidence: Math.max(tx.confidence, 0.95),
+    }));
+    const updated = recalculateSummary(activeStatement, verifiedTxList);
+    setStatements((prev) => prev.map((s) => (s.id === activeStatement.id ? updated : s)));
   };
 
   const handleDeleteTransactions = (idsToDelete: string[]) => {
@@ -448,7 +545,7 @@ export default function App() {
     const updated = recalculateSummary(activeStatement, newTxList);
     setStatements((prev) => prev.map((s) => (s.id === activeStatement.id ? updated : s)));
     if (user) {
-      syncStatementToCloud(user.uid, updated);
+      syncStatementToSupabase(user.id, updated);
     }
   };
 
@@ -458,7 +555,7 @@ export default function App() {
     const updated = recalculateSummary(activeStatement, newTxList);
     setStatements((prev) => prev.map((s) => (s.id === activeStatement.id ? updated : s)));
     if (user) {
-      syncStatementToCloud(user.uid, updated);
+      syncStatementToSupabase(user.id, updated);
     }
   };
 
@@ -471,15 +568,7 @@ export default function App() {
     const updated = recalculateSummary(activeStatement, newTxList);
     setStatements((prev) => prev.map((s) => (s.id === activeStatement.id ? updated : s)));
     if (user) {
-      syncStatementToCloud(user.uid, updated);
-    }
-  };
-
-  const handleRemoveStatementFromSession = (id: string) => {
-    const nextStatements = statements.filter((s) => s.id !== id);
-    setStatements(nextStatements);
-    if (activeStatementId === id) {
-      setActiveStatementId(nextStatements[0]?.id || null);
+      syncStatementToSupabase(user.id, updated);
     }
   };
 
@@ -492,14 +581,17 @@ export default function App() {
     } catch (err) {
       console.error(err);
     }
+    if (user) {
+      clearStatementsFromSupabase(user.id);
+    }
   };
 
   return (
     <div className={`min-h-screen flex flex-col transition-colors ${
-      isDarkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-100/70 text-slate-900'
+      isDarkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'
     }`}>
       
-      {/* Top Navbar with Firebase Auth */}
+      {/* Top Navbar with Real Links and Controls */}
       <Navbar
         isDarkMode={isDarkMode}
         onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
@@ -507,6 +599,7 @@ export default function App() {
         onOpenPrivacy={() => setIsPrivacyOpen(true)}
         onOpenHistory={() => setIsHistoryOpen(true)}
         onOpenShareEarn={() => setIsShareEarnOpen(true)}
+        onOpenPhoneVerify={() => setIsPhoneVerifyOpen(true)}
         onOpenAuth={() => setIsAuthOpen(true)}
         onLogout={handleLogout}
         user={user}
@@ -517,117 +610,113 @@ export default function App() {
         historyCount={history.length}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
+      {/* Auth Notification Toast */}
+      {authNotification && (
+        <div className="fixed top-20 right-4 z-50 p-3.5 rounded-xl bg-sky-600 text-white text-xs font-semibold shadow-xl shadow-sky-600/30 flex items-center gap-2 animate-in slide-in-from-top-4 duration-300">
+          <Database className="w-4 h-4" />
+          <span>{authNotification}</span>
+        </div>
+      )}
+
+      {/* Referral Notification Toast */}
+      {referralNotification && (
+        <div className="fixed top-20 left-4 z-50 p-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-sky-600 text-white text-xs font-semibold shadow-xl flex items-center gap-2 animate-in slide-in-from-top-4 duration-300">
+          <Gift className="w-4 h-4" />
+          <span>{referralNotification}</span>
+          <button onClick={() => setReferralNotification(null)} className="ml-2 text-white/80 hover:text-white cursor-pointer">&times;</button>
+        </div>
+      )}
+
+      {/* Main Container */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         
-        {/* Auth status notification banner */}
-        {authNotification && (
-          <div className="p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 flex items-center justify-between text-xs animate-in fade-in">
-            <div className="flex items-center gap-2">
-              <Cloud className="w-4 h-4 text-emerald-500" />
-              <span>{authNotification}</span>
-            </div>
-            <button onClick={() => setAuthNotification(null)} className="font-bold hover:underline">
-              Dismiss
-            </button>
-          </div>
+        {/* Breadcrumb Navigation on Inner Pages */}
+        {activeSeoPage.breadcrumbs && activeSeoPage.breadcrumbs.length > 0 && (
+          <nav aria-label="Breadcrumb" className="text-xs text-slate-600 dark:text-slate-400">
+            <ol className="flex flex-wrap items-center gap-1.5">
+              {activeSeoPage.breadcrumbs.map((b, idx, arr) => (
+                <li key={`${b.path}-${idx}`} className="inline-flex items-center">
+                  {idx > 0 && <span className="mx-1.5 text-slate-400">/</span>}
+                  {idx === arr.length - 1 ? (
+                    <span className="font-semibold text-slate-900 dark:text-white">{b.name}</span>
+                  ) : (
+                    <a href={b.path} className="hover:text-sky-600 dark:hover:text-sky-400 transition-colors">
+                      {b.name}
+                    </a>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </nav>
         )}
 
-        {/* Referral Bonus Welcome Banner */}
-        {referralNotification && (
-          <div className="p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300 flex items-center justify-between text-xs animate-in fade-in">
-            <div className="flex items-center gap-2">
-              <Gift className="w-4 h-4 text-amber-500 shrink-0" />
-              <span className="font-semibold">{referralNotification}</span>
+        {/* Hero Section */}
+        <div className="text-center max-w-4xl mx-auto space-y-3">
+          {activeSeoPage.heroBadge && (
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-300 dark:border-sky-800">
+              <span>★</span>
+              <span>{activeSeoPage.heroBadge}</span>
             </div>
-            <button onClick={() => setReferralNotification(null)} className="font-bold hover:underline">
-              Got it!
-            </button>
-          </div>
-        )}
+          )}
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight">
+            {activeSeoPage.h1}
+          </h1>
+          {activeSeoPage.introParagraphs.map((p, i) => (
+            <p key={i} className="text-base sm:text-lg text-slate-700 dark:text-slate-300 leading-relaxed">
+              {p}
+            </p>
+          ))}
+        </div>
 
-        {/* Error Alert if any */}
+        {/* Global Error Banner */}
         {globalError && (
-          <div className="p-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400 flex items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{globalError}</span>
+          <div className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-sm flex items-start gap-3 animate-in fade-in">
+            <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-semibold">{globalError}</p>
             </div>
-            <button onClick={() => setGlobalError(null)} className="text-rose-500 hover:text-rose-700 font-bold">
-              Dismiss
+            <button
+              onClick={() => setGlobalError(null)}
+              className="text-rose-400 hover:text-rose-600 dark:hover:text-rose-200 cursor-pointer"
+            >
+              &times;
             </button>
           </div>
         )}
 
-        {/* Upload & Sample Section */}
-        <UploadZone
-          onFilesSelected={handleFilesSelected}
-          onLoadSample={handleLoadSample}
-          isProcessing={isProcessing}
-          processingProgress={processingProgress}
-          processingStep={processingStep}
-          isDarkMode={isDarkMode}
-          credits={userCredits}
-          onOpenShareEarn={() => setIsShareEarnOpen(true)}
-        />
-
-        {/* Active Statement Editor & Financial Breakdown */}
+        {/* Interactive Converter Workspace */}
         {activeStatement ? (
           <div className="space-y-6 animate-in fade-in duration-300">
-            
-            {/* Batch Navigation Strip if multiple statements are active */}
-            {statements.length > 1 && (
-              <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-xs">
-                <div className="flex items-center gap-2 overflow-x-auto py-1">
-                  <span className="font-bold text-slate-500 shrink-0">Batch Statements:</span>
-                  {statements.map((st) => (
-                    <button
-                      key={st.id}
-                      onClick={() => setActiveStatementId(st.id)}
-                      className={`px-3 py-1 rounded-lg font-semibold whitespace-nowrap transition-all ${
-                        st.id === activeStatement.id
-                          ? 'bg-emerald-600 text-white shadow-xs'
-                          : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200'
-                      }`}
-                    >
-                      {st.summary.bankName || st.fileName} ({st.transactions.length})
-                    </button>
-                  ))}
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={() => setIsBatchOpen(true)}
-                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20"
-                  >
-                    <Layers className="w-3.5 h-3.5" />
-                    <span>Batch Export & ZIP</span>
-                  </button>
-
-                  <button
-                    onClick={() => handleRemoveStatementFromSession(activeStatement.id)}
-                    className="p-1 text-slate-400 hover:text-rose-500 rounded-md"
-                    title="Close active statement"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setActiveStatementId(null)}
+                  className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  &larr; Upload Another Statement
+                </button>
               </div>
-            )}
 
-            {/* Statement Summary Card */}
+              <button
+                onClick={() => setIsBatchOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all shadow-xs cursor-pointer"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Batch Processing</span>
+              </button>
+            </div>
+
+            {/* Summary & Bank Details Card */}
             <StatementSummaryCard
               statement={activeStatement}
               settings={settings}
               isDarkMode={isDarkMode}
               onAutoReconcile={handleAutoReconcile}
-              onAddTransaction={() => {}}
             />
 
-            {/* Interactive Spreadsheet & Transactions Table */}
+            {/* Interactive Spreadsheet & Data Grid */}
             <TransactionTable
-              transactions={activeStatement.transactions}
-              currencySymbol={activeStatement.summary.currencySymbol}
+              statement={activeStatement}
               settings={settings}
               isDarkMode={isDarkMode}
               onUpdateTransaction={handleUpdateTransaction}
@@ -635,91 +724,297 @@ export default function App() {
               onAddTransaction={handleAddTransaction}
               onBatchUpdateCategory={handleBatchUpdateCategory}
             />
-
           </div>
         ) : (
-          <div className="py-16 text-center text-slate-400 space-y-3">
-            <FileSpreadsheet className="w-12 h-12 mx-auto text-emerald-500/50" />
-            <h3 className="text-base font-semibold text-slate-700 dark:text-slate-300">
-              No statement currently loaded
-            </h3>
-            <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              Upload your bank statement PDF, scanned passbook image, or spreadsheet above to begin.
-            </p>
+          <div className="max-w-4xl mx-auto">
+            <UploadZone
+              onProcessFiles={handleProcessFiles}
+              isProcessing={isProcessing}
+              processingProgress={processingProgress}
+              processingStep={processingStep}
+              isDarkMode={isDarkMode}
+              credits={userCredits}
+              availableCredits={userCredits.availableCredits}
+              onOpenShareEarn={() => setIsShareEarnOpen(true)}
+              hasActiveStatements={statements.length > 0}
+            />
           </div>
+        )}
+
+        {/* Bank Specific Details Box if viewing a bank page */}
+        {activeSeoPage.bankDetails && (
+          <div className="p-6 rounded-2xl border border-sky-500/30 bg-sky-500/5 dark:bg-sky-950/20 max-w-5xl mx-auto">
+            <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-3">
+              {activeSeoPage.h1} &mdash; Layout &amp; Password Details
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-slate-700 dark:text-slate-300">
+              <div>
+                <strong>Jurisdiction / Currency:</strong> {activeSeoPage.bankDetails.country} ({activeSeoPage.bankDetails.currency})
+              </div>
+              <div>
+                <strong>Default Date Notation:</strong> {activeSeoPage.bankDetails.defaultDateFormat}
+              </div>
+              <div className="md:col-span-2">
+                <strong>Statement Layout:</strong> {activeSeoPage.bankDetails.statementLayoutNotes}
+              </div>
+              <div className="md:col-span-2">
+                <strong>Password Pattern:</strong> {activeSeoPage.bankDetails.passwordConventionHelp}
+              </div>
+              <div className="md:col-span-2">
+                <strong>Extracted Columns:</strong> {activeSeoPage.bankDetails.columnOrder.join(' • ')}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* How It Works Section */}
+        <section className="my-12 max-w-5xl mx-auto">
+          <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-6 text-center">
+            How It Works: Step-by-Step Conversion
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            {activeSeoPage.howItWorksSteps.map((step) => (
+              <div key={step.step} className="p-5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xs">
+                <div className="w-8 h-8 rounded-xl bg-sky-600 text-white font-bold flex items-center justify-center text-sm mb-3">
+                  {step.step}
+                </div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 mb-2">{step.title}</h3>
+                <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">{step.description}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Key Features Section */}
+        <section className="my-12 max-w-5xl mx-auto">
+          <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-6 text-center">
+            Key Features &amp; Financial Precision
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {activeSeoPage.keyFeatures.map((f, i) => (
+              <div key={i} className="p-5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xs">
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 mb-2">{f.title}</h3>
+                <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">{f.description}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Security & In-Memory Guarantee */}
+        <section className="my-12 p-6 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 dark:bg-emerald-950/20 max-w-5xl mx-auto">
+          <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-3">
+            Security &amp; In-Memory Ephemeral Processing Guarantee
+          </h2>
+          <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed mb-4">
+            {activeSeoPage.securityNote}
+          </p>
+          <div className="flex flex-wrap gap-4 text-xs font-semibold text-slate-700 dark:text-slate-300">
+            <span className="inline-flex items-center gap-1.5"><span className="text-emerald-500 font-bold">&check;</span> Zero Server Disk Retention</span>
+            <span className="inline-flex items-center gap-1.5"><span className="text-emerald-500 font-bold">&check;</span> Formula Injection Sanitized</span>
+            <span className="inline-flex items-center gap-1.5"><span className="text-emerald-500 font-bold">&check;</span> End-to-End TLS Encryption</span>
+            <span className="inline-flex items-center gap-1.5"><span className="text-emerald-500 font-bold">&check;</span> Local Browser History Storage</span>
+          </div>
+        </section>
+
+        {/* Visible Frequently Asked Questions */}
+        <section className="my-12 max-w-4xl mx-auto">
+          <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-6 text-center">
+            Frequently Asked Questions
+          </h2>
+          <div className="space-y-4">
+            {activeSeoPage.faqs.map((faq, i) => (
+              <div key={i} className="p-5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 mb-2">{faq.question}</h3>
+                <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">{faq.answer}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Related Conversion Tools */}
+        {activeSeoPage.relatedSlugs && activeSeoPage.relatedSlugs.length > 0 && (
+          <section className="my-12 max-w-5xl mx-auto">
+            <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-6 text-center">
+              Related Conversion Tools &amp; Hubs
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {activeSeoPage.relatedSlugs.map((slug) => {
+                const relPage = ALL_SEO_PAGES[slug];
+                if (!relPage) return null;
+                return (
+                  <a
+                    key={slug}
+                    href={relPage.urlPath}
+                    className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-sky-500 hover:shadow-md transition-all group block"
+                  >
+                    <div className="text-xs font-bold text-sky-600 dark:text-sky-400 mb-1">{relPage.primaryKeyword}</div>
+                    <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 group-hover:text-sky-600 dark:group-hover:text-sky-400 transition-colors">
+                      {relPage.h1}
+                    </div>
+                    <p className="text-xs text-slate-600 dark:text-slate-400 mt-2 line-clamp-2">{relPage.metaDescription}</p>
+                  </a>
+                );
+              })}
+            </div>
+          </section>
         )}
 
       </main>
 
-      {/* Footer */}
-      <footer className={`border-t py-6 text-xs transition-colors ${
-        isDarkMode ? 'bg-slate-900/60 border-slate-800 text-slate-500' : 'bg-white border-slate-200 text-slate-500'
-      }`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-slate-700 dark:text-slate-300">
-              Bank Statement Converter
-            </span>
-            <span>&bull;</span>
-            <span>Zero-Retention Financial OCR Engine</span>
+      {/* Structured Semantic Footer with All 14 Page Categories */}
+      <footer className="mt-auto bg-slate-900 text-slate-400 border-t border-slate-800 text-xs">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-8 mb-10">
+            {/* Col 1: Tools */}
+            <div>
+              <div className="text-white font-bold text-sm mb-3">Conversion Tools</div>
+              <ul className="space-y-2">
+                <li><a href="/pdf-bank-statement-to-excel" className="hover:text-white transition-colors">PDF to Excel</a></li>
+                <li><a href="/pdf-bank-statement-to-csv" className="hover:text-white transition-colors">PDF to CSV</a></li>
+                <li><a href="/scanned-bank-statement-to-excel" className="hover:text-white transition-colors">Scanned OCR to Excel</a></li>
+                <li><a href="/bank-statement-image-to-excel" className="hover:text-white transition-colors">Image &amp; Photo to Excel</a></li>
+                <li><a href="/passbook-to-excel" className="hover:text-white transition-colors">Passbook to Excel</a></li>
+                <li><a href="/bank-statement-reconciliation-excel" className="hover:text-white transition-colors">Reconciliation Audit</a></li>
+              </ul>
+            </div>
+
+            {/* Col 2: Targeted Banks */}
+            <div>
+              <div className="text-white font-bold text-sm mb-3">Targeted Banks</div>
+              <ul className="space-y-2">
+                <li><a href="/banks/sbi" className="hover:text-white transition-colors">SBI (State Bank of India)</a></li>
+                <li><a href="/banks/hdfc" className="hover:text-white transition-colors">HDFC Bank</a></li>
+                <li><a href="/banks/icici" className="hover:text-white transition-colors">ICICI Bank</a></li>
+                <li><a href="/banks/axis" className="hover:text-white transition-colors">Axis Bank</a></li>
+                <li><a href="/banks/kotak" className="hover:text-white transition-colors">Kotak Mahindra Bank</a></li>
+                <li><a href="/banks/pnb" className="hover:text-white transition-colors">Punjab National Bank</a></li>
+              </ul>
+            </div>
+
+            {/* Col 3: US & Global Banks */}
+            <div>
+              <div className="text-white font-bold text-sm mb-3">Global &amp; US Banks</div>
+              <ul className="space-y-2">
+                <li><a href="/banks/chase" className="hover:text-white transition-colors">Chase Bank</a></li>
+                <li><a href="/banks/bank-of-america" className="hover:text-white transition-colors">Bank of America</a></li>
+                <li><a href="/banks/wells-fargo" className="hover:text-white transition-colors">Wells Fargo</a></li>
+                <li><a href="/banks/citi" className="hover:text-white transition-colors">Citibank</a></li>
+                <li><a href="/banks/barclays" className="hover:text-white transition-colors">Barclays Bank</a></li>
+                <li><a href="/banks/hsbc" className="hover:text-white transition-colors">HSBC Global</a></li>
+              </ul>
+            </div>
+
+            {/* Col 4: Accounting Software */}
+            <div>
+              <div className="text-white font-bold text-sm mb-3">Accounting Feeds</div>
+              <ul className="space-y-2">
+                <li><a href="/bank-statement-to-quickbooks" className="hover:text-white transition-colors">QuickBooks (QBO/CSV)</a></li>
+                <li><a href="/bank-statement-to-xero-csv" className="hover:text-white transition-colors">Xero CSV Import</a></li>
+                <li><a href="/bank-statement-to-google-sheets" className="hover:text-white transition-colors">Google Sheets</a></li>
+                <li><a href="/for-accountants-and-bookkeepers" className="hover:text-white transition-colors">For CPAs &amp; Bookkeepers</a></li>
+                <li><a href="/pricing" className="hover:text-white transition-colors">Pricing &amp; Free Credits</a></li>
+              </ul>
+            </div>
+
+            {/* Col 5: Company & Legal */}
+            <div>
+              <div className="text-white font-bold text-sm mb-3">Company &amp; Legal</div>
+              <ul className="space-y-2">
+                <li><a href="/blog/how-to-convert-bank-statement-pdf-to-excel" className="hover:text-white transition-colors">PDF to Excel Guide</a></li>
+                <li><a href="/blog/is-it-safe-to-upload-bank-statement-online" className="hover:text-white transition-colors">Security &amp; Safety Guide</a></li>
+                <li><a href="/security" className="hover:text-white transition-colors">Security Architecture</a></li>
+                <li><a href="/privacy" className="hover:text-white transition-colors">Privacy Policy</a></li>
+                <li><a href="/terms" className="hover:text-white transition-colors">Terms of Service</a></li>
+                <li><a href="/about" className="hover:text-white transition-colors">About Us</a></li>
+                <li><a href="/contact" className="hover:text-white transition-colors">Contact Support</a></li>
+              </ul>
+            </div>
           </div>
 
-          <div className="flex items-center gap-4">
-            {!user ? (
-              <button
-                onClick={() => setIsAuthOpen(true)}
-                className="hover:underline text-emerald-600 dark:text-emerald-400 font-semibold"
-              >
-                Sign In / Register
-              </button>
-            ) : (
-              <span className="text-slate-400">
-                Logged in as <strong>{user.email}</strong>
-              </span>
-            )}
-            <button
-              onClick={() => setIsShareEarnOpen(true)}
-              className="hover:underline text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1"
-            >
-              <Gift className="w-3.5 h-3.5" />
-              <span>Share & Earn +10 Converts</span>
-            </button>
-            <button
-              onClick={() => setIsPrivacyOpen(true)}
-              className="hover:underline text-slate-600 dark:text-slate-400"
-            >
-              Privacy Policy
-            </button>
-            <button
-              onClick={() => setIsSettingsOpen(true)}
-              className="hover:underline text-slate-600 dark:text-slate-400"
-            >
-              Preferences
-            </button>
+          <div className="border-t border-slate-800 pt-6 flex flex-col md:flex-row items-center justify-between gap-4">
+            <div>
+              &copy; {new Date().getFullYear()} {BRAND_NAME} ({DOMAIN}). All rights reserved.
+            </div>
+            <div className="flex items-center gap-4">
+              <span>Support: <a href={`mailto:${SUPPORT_EMAIL}`} className="text-sky-400 hover:underline">{SUPPORT_EMAIL}</a></span>
+              <span>•</span>
+              <a href="/security" className="hover:underline">In-Memory Zero Retention</a>
+            </div>
           </div>
         </div>
       </footer>
 
-      {/* Authentication Modal */}
-      <AuthModal
-        isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
-        isDarkMode={isDarkMode}
-        onAuthSuccess={(authUser) => {
-          setUser(authUser);
-          confetti({ particleCount: 50, spread: 70, origin: { y: 0.6 } });
-        }}
-      />
+      {/* Cookie Consent Banner for GA4 Analytics */}
+      {showCookieBanner && (
+        <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:max-w-md z-50 p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl animate-in slide-in-from-bottom-4">
+          <div className="flex items-start gap-3">
+            <Cookie className="w-5 h-5 text-sky-500 shrink-0 mt-0.5" />
+            <div className="text-xs text-slate-700 dark:text-slate-300">
+              <span className="font-bold text-slate-900 dark:text-white block mb-1">Privacy &amp; Analytics Consent</span>
+              We use lightweight analytics to understand conversion performance. Uploaded files are processed in-memory with zero disk retention.
+            </div>
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-2 text-xs">
+            <button
+              onClick={() => {
+                setCookieConsent(false);
+                setShowCookieBanner(false);
+              }}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-medium hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              Decline
+            </button>
+            <button
+              onClick={() => {
+                setCookieConsent(true);
+                setShowCookieBanner(false);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold transition-colors cursor-pointer"
+            >
+              Accept Analytics
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Share & Earn Credits Modal */}
       <ShareEarnModal
         isOpen={isShareEarnOpen}
         onClose={() => setIsShareEarnOpen(false)}
         credits={userCredits}
+        onClaimCredits={handleClaimShareReward}
         onClaimShareReward={handleClaimShareReward}
+        onOpenPhoneVerify={() => {
+          setIsShareEarnOpen(false);
+          setIsPhoneVerifyOpen(true);
+        }}
+        referralCode={userCredits.referralCode}
         isDarkMode={isDarkMode}
-        isExhausted={userCredits.availableCredits <= 0}
-        referralCode={userCredits.referralCode || 'REF-CONVERT'}
+      />
+
+      {/* Supabase Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+        isDarkMode={isDarkMode}
+        onOpenPhoneVerify={() => {
+          setIsAuthOpen(false);
+          setIsPhoneVerifyOpen(true);
+        }}
+        onAuthSuccess={(u) => {
+          setUser(u);
+          setIsAuthOpen(false);
+        }}
+      />
+
+      {/* Twilio SMS Phone Verification Modal */}
+      <PhoneVerificationModal
+        isOpen={isPhoneVerifyOpen}
+        onClose={() => setIsPhoneVerifyOpen(false)}
+        isDarkMode={isDarkMode}
+        currentPhoneNumber={userCredits.phoneNumber || user?.phoneNumber}
+        isAlreadyVerified={userCredits.phoneVerified || user?.phoneVerified}
+        onVerificationSuccess={handlePhoneVerificationSuccess}
       />
 
       {/* Conversion Settings Modal */}
@@ -735,25 +1030,30 @@ export default function App() {
       <PrivacyModal
         isOpen={isPrivacyOpen}
         onClose={() => setIsPrivacyOpen(false)}
-        onClearAllLocalData={handleClearAllLocalData}
         isDarkMode={isDarkMode}
       />
 
-      {/* Conversion History Drawer */}
+      {/* History Drawer */}
       <HistoryDrawer
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
         history={history}
         onSelectStatement={(st) => {
-          setStatements((prev) => (prev.some((p) => p.id === st.id) ? prev : [st, ...prev]));
+          setStatements((prev) => (prev.some((s) => s.id === st.id) ? prev : [st, ...prev]));
           setActiveStatementId(st.id);
         }}
         onDeleteHistoryItem={(id) => {
-          saveHistory(history.filter((h) => h.id !== id));
+          const next = history.filter((h) => h.id !== id);
+          saveHistory(next);
         }}
-        onClearHistory={() => saveHistory([])}
+        onClearHistory={handleClearAllLocalData}
         settings={settings}
         isDarkMode={isDarkMode}
+        user={user}
+        onOpenAuth={() => {
+          setIsHistoryOpen(false);
+          setIsAuthOpen(true);
+        }}
       />
 
       {/* Batch Processing Modal */}
@@ -761,11 +1061,14 @@ export default function App() {
         isOpen={isBatchOpen}
         onClose={() => setIsBatchOpen(false)}
         statements={statements}
-        activeStatementId={activeStatementId}
-        onSelectStatement={(id) => setActiveStatementId(id)}
-        onRemoveStatement={handleRemoveStatementFromSession}
+        onProcessBatch={handleProcessFiles}
         settings={settings}
         isDarkMode={isDarkMode}
+        credits={userCredits}
+        onOpenShareEarn={() => {
+          setIsBatchOpen(false);
+          setIsShareEarnOpen(true);
+        }}
       />
 
     </div>

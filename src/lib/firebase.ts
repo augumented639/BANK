@@ -16,11 +16,14 @@ import {
   doc, 
   getDoc, 
   setDoc, 
+  deleteDoc,
   collection, 
   getDocs, 
   query, 
   orderBy, 
-  limit 
+  limit,
+  getDocFromServer,
+  writeBatch
 } from 'firebase/firestore';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 import { UserCredits, ExtractedStatement } from '../types';
@@ -46,6 +49,66 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 export const db = firebaseConfigJson.firestoreDatabaseId && firebaseConfigJson.firestoreDatabaseId !== '(default)'
   ? getFirestore(app, firebaseConfigJson.firestoreDatabaseId)
   : getFirestore(app);
+
+// Operation types for standard error handling
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map((provider) => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || [],
+    },
+    operationType,
+    path,
+  };
+  console.error('Firestore Error:', JSON.stringify(errInfo));
+  return errInfo;
+}
+
+// Test initial connection to Firestore
+export async function testFirestoreConnection() {
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error: any) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.warn('Firestore offline / configuration notice:', error.message);
+    }
+  }
+}
+testFirestoreConnection();
 
 // Authentication helper functions
 export const signInWithGoogle = async () => {
@@ -133,8 +196,12 @@ export const formatAuthError = (error: any): string => {
   }
 };
 
-// Cloud Sync Helpers
+// ==========================================
+// Firestore Cloud User Data Store Operations
+// ==========================================
+
 export const syncUserCreditsToCloud = async (userId: string, credits: UserCredits, userEmail?: string | null, userName?: string | null) => {
+  const path = `users/${userId}`;
   try {
     const userDocRef = doc(db, 'users', userId);
     await setDoc(userDocRef, {
@@ -152,11 +219,12 @@ export const syncUserCreditsToCloud = async (userId: string, credits: UserCredit
       updatedAt: new Date().toISOString(),
     }, { merge: true });
   } catch (err) {
-    console.warn('Failed to sync credits to cloud:', err);
+    handleFirestoreError(err, OperationType.WRITE, path);
   }
 };
 
 export const loadUserCreditsFromCloud = async (userId: string): Promise<UserCredits | null> => {
+  const path = `users/${userId}`;
   try {
     const userDocRef = doc(db, 'users', userId);
     const docSnap = await getDoc(userDocRef);
@@ -175,12 +243,13 @@ export const loadUserCreditsFromCloud = async (userId: string): Promise<UserCred
       };
     }
   } catch (err) {
-    console.warn('Failed to load user credits from cloud:', err);
+    handleFirestoreError(err, OperationType.GET, path);
   }
   return null;
 };
 
 export const syncStatementToCloud = async (userId: string, statement: ExtractedStatement) => {
+  const path = `users/${userId}/history/${statement.id}`;
   try {
     const stmtRef = doc(db, 'users', userId, 'history', statement.id);
     await setDoc(stmtRef, {
@@ -188,22 +257,49 @@ export const syncStatementToCloud = async (userId: string, statement: ExtractedS
       savedAt: new Date().toISOString(),
     });
   } catch (err) {
-    console.warn('Failed to sync statement to cloud:', err);
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+};
+
+export const deleteStatementFromCloud = async (userId: string, statementId: string) => {
+  const path = `users/${userId}/history/${statementId}`;
+  try {
+    const stmtRef = doc(db, 'users', userId, 'history', statementId);
+    await deleteDoc(stmtRef);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
+};
+
+export const clearHistoryFromCloud = async (userId: string) => {
+  const path = `users/${userId}/history`;
+  try {
+    const historyColRef = collection(db, 'users', userId, 'history');
+    const snapshot = await getDocs(historyColRef);
+    const batch = writeBatch(db);
+    snapshot.forEach((docSnap) => {
+      batch.delete(docSnap.ref);
+    });
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
   }
 };
 
 export const loadHistoryFromCloud = async (userId: string): Promise<ExtractedStatement[]> => {
+  const path = `users/${userId}/history`;
   try {
     const historyColRef = collection(db, 'users', userId, 'history');
-    const q = query(historyColRef, orderBy('uploadDate', 'desc'), limit(30));
+    const q = query(historyColRef, orderBy('uploadDate', 'desc'), limit(50));
     const snapshot = await getDocs(q);
     const list: ExtractedStatement[] = [];
-    snapshot.forEach((doc) => {
-      list.push(doc.data() as ExtractedStatement);
+    snapshot.forEach((docSnap) => {
+      list.push(docSnap.data() as ExtractedStatement);
     });
     return list;
   } catch (err) {
-    console.warn('Failed to load history from cloud:', err);
+    handleFirestoreError(err, OperationType.LIST, path);
     return [];
   }
 };
+

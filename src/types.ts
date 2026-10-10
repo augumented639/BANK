@@ -107,6 +107,9 @@ export interface UserCredits {
   referralCode?: string;
   referredUsersCount?: number;
   claimedReferralBonus?: boolean;
+  phoneNumber?: string;
+  phoneVerified?: boolean;
+  phoneVerifiedBonusClaimed?: boolean;
   lastShareVerificationDate?: string;
   lastClaimDate?: string;
 }
@@ -118,4 +121,5 @@ export const INITIAL_USER_CREDITS: UserCredits = {
   sharesCount: 0,
   referredUsersCount: 0,
   claimedReferralBonus: false,
+  phoneVerified: false,
 };

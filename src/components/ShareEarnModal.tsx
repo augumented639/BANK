@@ -16,7 +16,9 @@ import {
   Users,
   Clock,
   RefreshCw,
-  HelpCircle
+  HelpCircle,
+  Smartphone,
+  Phone
 } from 'lucide-react';
 import { UserCredits } from '../types';
 import confetti from 'canvas-confetti';
@@ -24,11 +26,13 @@ import confetti from 'canvas-confetti';
 interface ShareEarnModalProps {
   isOpen: boolean;
   onClose: () => void;
-  credits: UserCredits;
-  onClaimShareReward: (creditsToAdd?: number) => void;
+  credits?: UserCredits;
+  onClaimShareReward?: (creditsToAdd?: number) => void;
+  onClaimCredits?: (creditsToAdd?: number) => void;
+  onOpenPhoneVerify?: () => void;
   isDarkMode: boolean;
   isExhausted?: boolean;
-  referralCode: string;
+  referralCode?: string;
 }
 
 export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
@@ -36,9 +40,11 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
   onClose,
   credits,
   onClaimShareReward,
+  onClaimCredits,
+  onOpenPhoneVerify,
   isDarkMode,
   isExhausted = false,
-  referralCode,
+  referralCode: referralCodeProp,
 }) => {
   const [copied, setCopied] = useState(false);
   const [justEarned, setJustEarned] = useState<string | null>(null);
@@ -48,9 +54,21 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
   const [isCheckingReferrals, setIsCheckingReferrals] = useState<boolean>(false);
   const [verifiedReferralsFound, setVerifiedReferralsFound] = useState<number>(0);
 
+  const availableCredits = credits?.availableCredits ?? 10;
+  const sharesCount = credits?.sharesCount ?? 0;
+  const effectiveReferralCode = referralCodeProp || credits?.referralCode || 'REF-SHARE';
+
+  const triggerClaimReward = (amount: number = 10) => {
+    if (onClaimShareReward) {
+      onClaimShareReward(amount);
+    } else if (onClaimCredits) {
+      onClaimCredits(amount);
+    }
+  };
+
   // Generate unique share URL with user's referral code
   const baseUrl = typeof window !== 'undefined' ? window.location.origin + window.location.pathname : 'https://bank-statement-converter.app';
-  const shareUrl = `${baseUrl}?ref=${encodeURIComponent(referralCode)}`;
+  const shareUrl = `${baseUrl}?ref=${encodeURIComponent(effectiveReferralCode)}`;
   const shareText = `Convert any Bank Statement PDF, Image, or CSV into clean Excel & CSV spreadsheets with 100% privacy & automated reconciliation! Get +5 bonus converts with this link:`;
   const fullShareMessage = `${shareText} ${shareUrl}`;
 
@@ -72,18 +90,18 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
     setIsCheckingReferrals(true);
     setErrorMessage(null);
     try {
-      const res = await fetch(`/api/referral/check-rewards/${encodeURIComponent(referralCode)}`);
+      const res = await fetch(`/api/referral/check-rewards/${encodeURIComponent(effectiveReferralCode)}`);
       const data = await res.json();
       if (data.success && data.unclaimed > 0) {
         // Claim the verified referral rewards
         await fetch('/api/referral/claim-rewards', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ referralCode }),
+          body: JSON.stringify({ referralCode: effectiveReferralCode }),
         });
 
         const rewardAmount = data.rewardCredits || data.unclaimed * 10;
-        onClaimShareReward(rewardAmount);
+        triggerClaimReward(rewardAmount);
         setVerifiedReferralsFound(data.totalVerified);
         setJustEarned(`+${rewardAmount} Credits Added! ${data.unclaimed} friend(s) opened your link!`);
         confetti({ particleCount: 80, spread: 90, origin: { y: 0.6 } });
@@ -190,15 +208,15 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
     
     // Cooldown check
     const now = Date.now();
-    const lastVerification = credits.lastShareVerificationDate ? new Date(credits.lastShareVerificationDate).getTime() : 0;
+    const lastVerification = credits?.lastShareVerificationDate ? new Date(credits.lastShareVerificationDate).getTime() : 0;
     const diffMinutes = (now - lastVerification) / (1000 * 60);
 
-    if (diffMinutes < 1 && credits.sharesCount > 0) {
+    if (diffMinutes < 1 && sharesCount > 0) {
       setErrorMessage('Please wait a minute before verifying another share.');
       return;
     }
 
-    onClaimShareReward(10);
+    triggerClaimReward(10);
     setJustEarned(`+10 Credits Added! Thank you for sharing on ${pendingPlatform || 'social media'}.`);
     setPendingPlatform(null);
     confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
@@ -245,13 +263,13 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
         {/* Current Balance Banner */}
         <div className="my-4 relative z-10 space-y-2">
           <div className={`p-4 rounded-xl border flex items-center justify-between transition-all ${
-            credits.availableCredits === 0
+            availableCredits === 0
               ? 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
               : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-300'
           }`}>
             <div className="flex items-center gap-3">
               <div className={`p-2 rounded-xl ${
-                credits.availableCredits === 0 ? 'bg-rose-500 text-white' : 'bg-emerald-600 text-white'
+                availableCredits === 0 ? 'bg-rose-500 text-white' : 'bg-emerald-600 text-white'
               }`}>
                 <Zap className="w-5 h-5" />
               </div>
@@ -260,7 +278,7 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
                   Your Balance
                 </span>
                 <span className="text-xl font-extrabold font-mono">
-                  {credits.availableCredits} Convert{credits.availableCredits !== 1 ? 's' : ''} Remaining
+                  {availableCredits} Convert{availableCredits !== 1 ? 's' : ''} Remaining
                 </span>
               </div>
             </div>
@@ -268,7 +286,7 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
             <div className="text-right text-xs">
               <span className="block opacity-75 font-medium">Earned by Sharing</span>
               <span className="font-bold font-mono text-sm text-emerald-600 dark:text-emerald-400">
-                +{credits.sharesCount * 10} credits
+                +{sharesCount * 10} credits
               </span>
             </div>
           </div>
@@ -340,6 +358,49 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
             </div>
           </div>
         )}
+
+        {/* Twilio Phone Verification Promo Banner */}
+        <div className="p-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/5 dark:bg-emerald-950/20 relative z-10 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 shrink-0">
+              <Smartphone className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5 font-bold text-xs text-slate-800 dark:text-slate-100">
+                <span>Twilio SMS Phone Verification</span>
+                {credits?.phoneVerified ? (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-semibold">
+                    &check; Claimed
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-600 text-white font-bold">
+                    +15 Free Credits
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {credits?.phoneVerified
+                  ? 'Your phone number has been verified via Twilio.'
+                  : 'Verify your phone number with a 6-digit OTP to get +15 free conversions immediately.'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              onClose();
+              onOpenPhoneVerify?.();
+            }}
+            disabled={credits?.phoneVerified}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold shrink-0 transition-all cursor-pointer ${
+              credits?.phoneVerified
+                ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-default'
+                : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-xs'
+            }`}
+          >
+            {credits?.phoneVerified ? 'Verified' : 'Verify Now'}
+          </button>
+        </div>
 
         {/* Share Action Grid */}
         <div className="space-y-3 relative z-10">
@@ -500,7 +561,7 @@ export const ShareEarnModal: React.FC<ShareEarnModalProps> = ({
         {/* Footer */}
         <div className="flex items-center justify-between pt-4 mt-4 border-t border-slate-200 dark:border-slate-800 relative z-10">
           <span className="text-[11px] text-slate-400">
-            {credits.sharesCount} verified share{credits.sharesCount !== 1 ? 's' : ''} completed
+            {sharesCount} verified share{sharesCount !== 1 ? 's' : ''} completed
           </span>
 
           <button

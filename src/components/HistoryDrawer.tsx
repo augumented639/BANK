@@ -1,19 +1,20 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   History, 
   X, 
   Trash2, 
   Download, 
   FileSpreadsheet, 
-  FileText, 
   Building2, 
-  CheckCircle2, 
-  AlertTriangle,
-  ArrowRight,
-  Clock
+  ArrowRight, 
+  Clock, 
+  Database, 
+  ShieldCheck,
+  AlertTriangle
 } from 'lucide-react';
 import { ExtractedStatement, ConversionSettings } from '../types';
-import { formatCurrency, exportToExcel, exportToCSV, exportToPDF } from '../utils/exportUtils';
+import { exportToExcel, exportToPDF } from '../utils/exportUtils';
+import { AppUser } from '../lib/supabase';
 
 interface HistoryDrawerProps {
   isOpen: boolean;
@@ -24,6 +25,8 @@ interface HistoryDrawerProps {
   onClearHistory: () => void;
   settings: ConversionSettings;
   isDarkMode: boolean;
+  user?: AppUser | null;
+  onOpenAuth?: () => void;
 }
 
 export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
@@ -35,7 +38,11 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
   onClearHistory,
   settings,
   isDarkMode,
+  user,
+  onOpenAuth,
 }) => {
+  const [showConfirmClear, setShowConfirmClear] = useState(false);
+
   if (!isOpen) return null;
 
   return (
@@ -47,40 +54,68 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
         {/* Header */}
         <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
+            <div className="p-2 rounded-xl bg-sky-500/10 text-sky-600 dark:text-sky-400">
               <History className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-bold">Conversion History</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {history.length} converted statement{history.length !== 1 ? 's' : ''} saved locally
-              </p>
+              <div className="flex items-center gap-2 mt-0.5">
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  {history.length} statement{history.length !== 1 ? 's' : ''} saved locally
+                </p>
+                {user ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                    <Database className="w-3 h-3" />
+                    <span>Cloud Synced</span>
+                  </span>
+                ) : (
+                  <button
+                    onClick={onOpenAuth}
+                    className="inline-flex items-center gap-1 text-[10px] text-sky-600 dark:text-sky-400 hover:underline font-semibold cursor-pointer"
+                  >
+                    <span>Backup to Cloud</span>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600">
+          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer">
             <X className="w-5 h-5" />
           </button>
+        </div>
+
+        {/* Privacy & Storage Transparency Notice */}
+        <div className="mx-4 mt-3 p-3 rounded-xl bg-sky-500/5 dark:bg-sky-950/20 border border-sky-500/20 text-xs text-slate-700 dark:text-slate-300">
+          <div className="flex items-start gap-2">
+            <ShieldCheck className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-bold text-slate-900 dark:text-slate-100 mb-0.5">Where is this data stored?</div>
+              <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">
+                Uploaded document files are processed in ephemeral server RAM and discarded immediately. Your transaction history resides in your browser’s local storage (localStorage) unless you choose to sign in.
+              </p>
+            </div>
+          </div>
         </div>
 
         {/* List of History Items */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {history.length === 0 ? (
-            <div className="py-16 text-center text-slate-400 space-y-2">
-              <History className="w-10 h-10 mx-auto opacity-40 text-teal-500" />
+            <div className="py-16 text-center text-slate-500 dark:text-slate-400 space-y-2">
+              <History className="w-10 h-10 mx-auto opacity-40 text-sky-500" />
               <p className="text-xs">No converted statements in history yet.</p>
             </div>
           ) : (
             history.map((item) => (
               <div
                 key={item.id}
-                className={`p-3.5 rounded-xl border transition-all hover:border-teal-500/50 ${
+                className={`p-3.5 rounded-xl border transition-all hover:border-sky-500/50 ${
                   isDarkMode ? 'bg-slate-800/50 border-slate-800' : 'bg-slate-50 border-slate-200 shadow-xs'
                 }`}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2">
-                    <Building2 className="w-4 h-4 text-teal-600 dark:text-teal-400 shrink-0" />
+                    <Building2 className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
                     <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
                       {item.summary.bankName}
                     </span>
@@ -88,14 +123,14 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
 
                   <button
                     onClick={() => onDeleteHistoryItem(item.id)}
-                    className="text-slate-400 hover:text-rose-500 p-1"
+                    className="text-slate-400 hover:text-rose-500 p-1 cursor-pointer"
                     title="Delete item"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
 
-                <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-400">
                   <span className="truncate max-w-[200px]">{item.fileName}</span>
                   <span className="font-mono">
                     {item.transactions.length} rows &bull; {item.summary.currency} ({item.summary.currencySymbol})
@@ -103,7 +138,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
                 </div>
 
                 <div className="mt-2 pt-2 border-t border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between">
-                  <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
                     {new Date(item.uploadDate).toLocaleDateString()}
                   </span>
@@ -112,7 +147,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
                     {/* Re-export shortcuts */}
                     <button
                       onClick={() => exportToExcel(item, settings)}
-                      className="p-1 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20"
+                      className="p-1 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 cursor-pointer"
                       title="Quick export to Excel"
                     >
                       <FileSpreadsheet className="w-3.5 h-3.5" />
@@ -120,7 +155,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
 
                     <button
                       onClick={() => exportToPDF(item, settings)}
-                      className="p-1 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400 hover:bg-rose-500/20"
+                      className="p-1 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400 hover:bg-rose-500/20 cursor-pointer"
                       title="Quick export to PDF"
                     >
                       <Download className="w-3.5 h-3.5" />
@@ -132,7 +167,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
                         onSelectStatement(item);
                         onClose();
                       }}
-                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-teal-600 hover:bg-teal-500 text-white transition-all ml-1"
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-600 hover:bg-sky-500 text-white transition-all ml-1 cursor-pointer"
                     >
                       <span>Open</span>
                       <ArrowRight className="w-3 h-3" />
@@ -144,23 +179,54 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
           )}
         </div>
 
-        {/* Footer */}
+        {/* Footer with Clear Data Controls */}
         {history.length > 0 && (
-          <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
-            <button
-              onClick={onClearHistory}
-              className="text-xs text-rose-500 hover:text-rose-600 flex items-center gap-1 font-medium"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Clear History</span>
-            </button>
+          <div className="p-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+            {showConfirmClear ? (
+              <div className="p-3 rounded-xl border border-rose-500/30 bg-rose-500/10 space-y-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-rose-600 dark:text-rose-400">
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>Delete all local history?</span>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                  This permanently removes all cached statement tables from this browser.
+                </p>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={() => {
+                      onClearHistory();
+                      setShowConfirmClear(false);
+                    }}
+                    className="px-3 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold cursor-pointer"
+                  >
+                    Yes, Delete Everything
+                  </button>
+                  <button
+                    onClick={() => setShowConfirmClear(false)}
+                    className="px-3 py-1 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg text-xs font-semibold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => setShowConfirmClear(true)}
+                  className="text-xs text-rose-600 hover:text-rose-700 dark:text-rose-400 flex items-center gap-1 font-semibold cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Clear All Local History</span>
+                </button>
 
-            <button
-              onClick={onClose}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
-            >
-              Close
-            </button>
+                <button
+                  onClick={onClose}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            )}
           </div>
         )}
 

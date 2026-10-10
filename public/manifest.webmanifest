@@ -1,0 +1,17 @@
+{
+  "name": "Bank Statement Converter",
+  "short_name": "StatementConverter",
+  "description": "Convert bank statement PDF, scanned images, and photos to Excel or CSV. Free online financial converter with table OCR and reconciliation check.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0284c7",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

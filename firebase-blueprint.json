@@ -34,11 +34,11 @@
   },
   "firestore": {
     "/users/{userId}": {
-      "entity": "User",
+      "schema": "User",
       "description": "User document containing credit balance and profile"
     },
     "/users/{userId}/history/{statementId}": {
-      "entity": "StatementRecord",
+      "schema": "StatementRecord",
       "description": "Converted statements history belonging to user"
     }
   }
